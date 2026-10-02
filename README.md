@@ -76,14 +76,26 @@ CHANNELS=@safartrip_uz|SafarTrip,@mendora_en|Mendora,-1001234567890|Yopiq kanal|
 
 The bot must stay running. Use a **Background Worker**, not a Web Service. A free web service sleeps and polling stops.
 
+Python must be **3.11.x**. `python-telegram-bot` 20.7 crashes on Python 3.13 and 3.14 during `Application.builder().build()`. This repo pins 3.11.9 in `.python-version`, `runtime.txt`, and `render.yaml` (`PYTHON_VERSION`).
+
 1. Push this folder to a Git repository and connect it to [Render](https://render.com).
-2. **New → Background Worker**.
-3. Runtime: **Python 3.11** (or set env `PYTHON_VERSION` to `3.11.11`).
+2. **New → Background Worker** (or apply the `render.yaml` blueprint).
+3. Runtime: **Python 3.11**. Set the environment variable `PYTHON_VERSION` to `3.11.9`.
 4. Build command: `pip install -r requirements.txt`
 5. Start command: `python bot.py`
-6. Add the environment variables from the table above. Paste the real token only in the Render dashboard.
-7. Deploy. In the logs, confirm `SafarTrip lead bot is polling`.
+6. Add the environment variables from the table above. Paste the real token only in the Render dashboard. `render.yaml` lists the keys with `sync: false`, so the blueprint does not contain secret values.
+7. Deploy. If you changed the Python version on an existing service, use **Clear build cache & deploy**. A normal deploy can keep the old 3.14 environment and the worker will crash again.
 8. Send yourself `/start` in private and confirm the admin group gets the lead.
+
+A healthy startup log looks like this:
+
+```text
+INFO bot Python 3.11.9 (main, ...)
+INFO bot Subscription step is off
+INFO bot SafarTrip lead bot is polling
+```
+
+`Subscription step is off` appears only when `CHANNELS` is empty. With channels configured, that line lists their titles instead. If the log says `Unsupported Python version, expected 3.11`, the service is not on 3.11.x: set `PYTHON_VERSION=3.11.9` and clear the build cache.
 
 Render's disk is ephemeral: a new deploy or restart can wipe `leads.db`. The admin group message is the source of truth. Use `/export` during the event if you want a file. A paid persistent disk is optional; if you attach one, set `DB_PATH` to a path on that disk (for example `/var/data/leads.db`).
 

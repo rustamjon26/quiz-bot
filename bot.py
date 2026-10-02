@@ -708,6 +708,9 @@ def build_application() -> Application:
 
 def main() -> None:
     _configure_logging()
+    logger.info("Python %s", sys.version)
+    if sys.version_info[:2] < (3, 10) or sys.version_info[:2] > (3, 12):
+        logger.warning("Unsupported Python version, expected 3.11")
     config.validate()
     db.init_db(config.DB_PATH)
     if config.ADMIN_CHAT_ID is None:
