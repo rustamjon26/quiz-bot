@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import NamedTuple
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
 
@@ -71,6 +74,7 @@ class Channel(NamedTuple):
 
 
 _USERNAME_RE = re.compile(r"@[A-Za-z0-9_]{4,32}")
+_BARE_USERNAME_RE = re.compile(r"[A-Za-z0-9_]{4,32}")
 
 
 def _utf16_len(value: str) -> int:
@@ -82,42 +86,90 @@ def _valid_http_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
-def parse_channels(raw: str) -> tuple[Channel, ...]:
-    """Parse CHANNELS. Empty means the subscription step is off.
+def _username_from_tme(value: str) -> str | None:
+    """Public ``https://t.me/username`` links. Invite links (``+`` / joinchat) do not count."""
+    parsed = urlparse(value.strip())
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if parsed.scheme not in {"http", "https"} or host not in {"t.me", "telegram.me"}:
+        return None
+    slug = parsed.path.strip("/")
+    if not slug or "/" in slug or slug.startswith("+") or slug.lower() == "joinchat":
+        return None
+    if _BARE_USERNAME_RE.fullmatch(slug):
+        return slug
+    return None
 
-    Each comma-separated entry is ``chat|Title`` or ``chat|Title|invite_url``.
-    ``chat`` is ``@username`` or a numeric id. Titles cannot contain ``|`` or ``,``.
+
+def _skip_channel(name: str, entry: str, reason: str) -> None:
+    logger.warning("%s: skipping channel entry %r (%s)", name, entry, reason)
+
+
+def _parse_channel_entry(entry: str) -> Channel | None:
+    pieces = [piece.strip() for piece in entry.split("|", 2)]
+    chat_raw = pieces[0] if pieces else ""
+    title = pieces[1] if len(pieces) > 1 else ""
+    url = pieces[2] if len(pieces) > 2 else ""
+    if not chat_raw:
+        return None
+
+    if len(pieces) == 1:
+        slug = _username_from_tme(chat_raw)
+        if slug:
+            return Channel(f"@{slug}", slug, f"https://t.me/{slug}")
+        if _USERNAME_RE.fullmatch(chat_raw):
+            name = chat_raw[1:]
+            return Channel(chat_raw, name, f"https://t.me/{name}")
+        if _BARE_USERNAME_RE.fullmatch(chat_raw):
+            return Channel(f"@{chat_raw}", chat_raw, f"https://t.me/{chat_raw}")
+        return None
+
+    slug = _username_from_tme(chat_raw)
+    if slug:
+        chat_raw = f"@{slug}"
+        if not url:
+            url = f"https://t.me/{slug}"
+
+    if _USERNAME_RE.fullmatch(chat_raw):
+        if not title:
+            title = chat_raw[1:]
+        if _utf16_len(title) > 64 or (url and not _valid_http_url(url)):
+            return None
+        if not url:
+            url = f"https://t.me/{chat_raw[1:]}"
+        return Channel(chat_raw, title, url)
+
+    try:
+        chat_id = int(chat_raw)
+    except ValueError:
+        return None
+    if not title or _utf16_len(title) > 64 or not url.lower().startswith("https://") or not _valid_http_url(url):
+        return None
+    return Channel(chat_id, title, url)
+
+
+def parse_channels(raw: str, name: str = "CHANNELS") -> tuple[Channel, ...]:
+    """Parse a channel list. Empty, or every entry skipped, leaves the step off.
+
+    Each comma-separated entry is ``chat|Title``, ``chat|Title|invite_url``,
+    a lone ``@username``, or ``https://t.me/username``. A numeric id still
+    needs an https invite URL. Bad entries are logged and skipped.
     """
     channels: list[Channel] = []
     for part in raw.split(","):
         entry = part.strip()
         if not entry:
             continue
-        pieces = [piece.strip() for piece in entry.split("|", 2)]
-        if len(pieces) < 2 or not pieces[0] or not pieces[1]:
-            raise SystemExit(
-                "CHANNELS entries must look like @channel|Title or -100id|Title|https://t.me/+invite"
-            )
-        chat_raw, title = pieces[0], pieces[1]
-        url = pieces[2] if len(pieces) > 2 else ""
-        if _utf16_len(title) > 64:
-            raise SystemExit("A CHANNELS title is longer than 64 characters")
-        if url and not _valid_http_url(url):
-            raise SystemExit("A CHANNELS invite URL must start with http:// or https://")
-        if _USERNAME_RE.fullmatch(chat_raw):
-            if not url:
-                url = f"https://t.me/{chat_raw[1:]}"
-            channels.append(Channel(chat_raw, title, url))
-            continue
         try:
-            chat_id = int(chat_raw)
-        except ValueError as exc:
-            raise SystemExit(
-                "A CHANNELS chat must be @username or a numeric id"
-            ) from exc
-        if not url:
-            raise SystemExit("A numeric CHANNELS chat needs an invite URL")
-        channels.append(Channel(chat_id, title, url))
+            channel = _parse_channel_entry(entry)
+        except Exception:
+            logger.warning("%s: skipping channel entry %r (could not parse)", name, entry)
+            continue
+        if channel is None:
+            _skip_channel(name, entry, "could not parse")
+            continue
+        channels.append(channel)
     return tuple(channels)
 
 
@@ -163,9 +215,9 @@ SITE_URL_SAFARTRIP: str = _normalize_site_url(
 SITE_URL_MENDORA: str = _normalize_site_url(_raw("SITE_URL_MENDORA"), "https://mendora.tech")
 SITE_URL: str = SITE_URL_SAFARTRIP
 DB_PATH: str = _raw("DB_PATH", _DEFAULT_DB_PATH) or _DEFAULT_DB_PATH
-CHANNELS: tuple[Channel, ...] = parse_channels(_raw("CHANNELS"))
-CHANNELS_SAFARTRIP: tuple[Channel, ...] = parse_channels(_raw("CHANNELS_SAFARTRIP"))
-CHANNELS_MENDORA: tuple[Channel, ...] = parse_channels(_raw("CHANNELS_MENDORA"))
+CHANNELS: tuple[Channel, ...] = parse_channels(_raw("CHANNELS"), "CHANNELS")
+CHANNELS_SAFARTRIP: tuple[Channel, ...] = parse_channels(_raw("CHANNELS_SAFARTRIP"), "CHANNELS_SAFARTRIP")
+CHANNELS_MENDORA: tuple[Channel, ...] = parse_channels(_raw("CHANNELS_MENDORA"), "CHANNELS_MENDORA")
 CONTACT_SAFARTRIP: str = _handle(_raw("CONTACT_SAFARTRIP"), "@anvarovic06")
 CONTACT_MENDORA: str = _handle(_raw("CONTACT_MENDORA"), "@sz_2302")
 

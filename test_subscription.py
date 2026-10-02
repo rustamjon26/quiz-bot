@@ -39,9 +39,25 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(parse_channels(""), ())
         self.assertEqual(parse_channels("  ,  "), ())
 
-    def test_numeric_without_invite_is_rejected(self) -> None:
-        with self.assertRaises(SystemExit):
-            parse_channels("-1001|Yopiq")
+    def test_numeric_without_invite_is_skipped(self) -> None:
+        with self.assertLogs("config", level="WARNING") as caught:
+            channels = parse_channels("-1001|Yopiq", "CHANNELS")
+        self.assertEqual(channels, ())
+        self.assertTrue(any("CHANNELS" in line and "-1001|Yopiq" in line for line in caught.output))
+
+    def test_username_url_and_bad_entry_do_not_abort(self) -> None:
+        raw = "@safartrip_uz,https://t.me/mendora_en,not a channel,@other|Title,"
+        with self.assertLogs("config", level="WARNING") as caught:
+            channels = parse_channels(raw, "CHANNELS_MENDORA")
+        self.assertEqual(
+            channels,
+            (
+                Channel("@safartrip_uz", "safartrip_uz", "https://t.me/safartrip_uz"),
+                Channel("@mendora_en", "mendora_en", "https://t.me/mendora_en"),
+                Channel("@other", "Title", "https://t.me/other"),
+            ),
+        )
+        self.assertTrue(any("CHANNELS_MENDORA" in line and "not a channel" in line for line in caught.output))
 
 
 class MembershipTests(unittest.TestCase):
