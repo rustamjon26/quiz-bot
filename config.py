@@ -49,12 +49,19 @@ def _parse_chat_id(raw: str) -> int | None:
         raise SystemExit("ADMIN_CHAT_ID must be an integer") from exc
 
 
-def _normalize_site_url(raw: str) -> str:
-    candidate = raw or _DEFAULT_SITE_URL
+def _normalize_site_url(raw: str, default: str = _DEFAULT_SITE_URL) -> str:
+    candidate = raw or default
     parsed = urlparse(candidate)
     if parsed.scheme in {"http", "https"} and parsed.netloc:
         return candidate
-    return _DEFAULT_SITE_URL
+    return default
+
+
+def _handle(raw: str, default: str) -> str:
+    value = (raw or default).strip()
+    if value and not value.startswith("@"):
+        value = f"@{value}"
+    return value or default
 
 
 class Channel(NamedTuple):
@@ -114,14 +121,53 @@ def parse_channels(raw: str) -> tuple[Channel, ...]:
     return tuple(channels)
 
 
+def channels_for(project: str) -> tuple[Channel, ...]:
+    """SafarTrip falls back to CHANNELS. 'both' is the union, first list wins ties."""
+    if project == "mendora":
+        return CHANNELS_MENDORA
+    if project == "both":
+        return _union(channels_for("safartrip"), channels_for("mendora"))
+    if CHANNELS_SAFARTRIP:
+        return CHANNELS_SAFARTRIP
+    return CHANNELS
+
+
+def _union(first: tuple[Channel, ...], second: tuple[Channel, ...]) -> tuple[Channel, ...]:
+    seen: set[str | int] = set()
+    merged: list[Channel] = []
+    for channel in (*first, *second):
+        if channel.chat in seen:
+            continue
+        seen.add(channel.chat)
+        merged.append(channel)
+    return tuple(merged)
+
+
 BOT_TOKEN: str = _raw("BOT_TOKEN")
 ADMIN_CHAT_ID: int | None = _parse_chat_id(_raw("ADMIN_CHAT_ID"))
 ADMIN_IDS: frozenset[int] = _parse_admin_ids(_raw("ADMIN_IDS"))
-PROMO_CODE: str = _raw("PROMO_CODE", _DEFAULT_PROMO_CODE) or _DEFAULT_PROMO_CODE
-PROMO_TEXT: str = _raw("PROMO_TEXT", _DEFAULT_PROMO_TEXT) or _DEFAULT_PROMO_TEXT
-SITE_URL: str = _normalize_site_url(_raw("SITE_URL", _DEFAULT_SITE_URL))
+PROMO_CODE_SAFARTRIP: str = (
+    _raw("PROMO_CODE_SAFARTRIP") or _raw("PROMO_CODE", _DEFAULT_PROMO_CODE) or _DEFAULT_PROMO_CODE
+)
+PROMO_TEXT_SAFARTRIP: str = (
+    _raw("PROMO_TEXT_SAFARTRIP") or _raw("PROMO_TEXT", _DEFAULT_PROMO_TEXT) or _DEFAULT_PROMO_TEXT
+)
+PROMO_CODE_MENDORA: str = _raw("PROMO_CODE_MENDORA")
+PROMO_TEXT_MENDORA: str = _raw("PROMO_TEXT_MENDORA")
+PROMO_CODE: str = PROMO_CODE_SAFARTRIP
+PROMO_TEXT: str = PROMO_TEXT_SAFARTRIP
+SITE_URL_SAFARTRIP: str = _normalize_site_url(
+    _raw("SITE_URL_SAFARTRIP") or _raw("SITE_URL"),
+    "https://safartrip.uz",
+)
+SITE_URL_MENDORA: str = _normalize_site_url(_raw("SITE_URL_MENDORA"), "https://mendora.tech")
+SITE_URL: str = SITE_URL_SAFARTRIP
 DB_PATH: str = _raw("DB_PATH", _DEFAULT_DB_PATH) or _DEFAULT_DB_PATH
 CHANNELS: tuple[Channel, ...] = parse_channels(_raw("CHANNELS"))
+CHANNELS_SAFARTRIP: tuple[Channel, ...] = parse_channels(_raw("CHANNELS_SAFARTRIP"))
+CHANNELS_MENDORA: tuple[Channel, ...] = parse_channels(_raw("CHANNELS_MENDORA"))
+CONTACT_SAFARTRIP: str = _handle(_raw("CONTACT_SAFARTRIP"), "@anvarovic06")
+CONTACT_MENDORA: str = _handle(_raw("CONTACT_MENDORA"), "@sz_2302")
 
 
 def validate() -> None:

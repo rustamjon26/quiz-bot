@@ -1,4 +1,4 @@
-"""SafarTrip Telegram lead bot. Polling mode for a Render Background Worker."""
+"""SafarTrip and Mendora lead bot. Polling mode for a Render Background Worker."""
 
 from __future__ import annotations
 
@@ -42,7 +42,15 @@ TASHKENT = timezone(timedelta(hours=5))
 _UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _SOURCE_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
 
-CHOOSING_ROLE, ASKING_NAME, ASKING_PHONE, AWAITING_SUB = range(4)
+_PROJECTS = (texts.PROJECT_SAFARTRIP, texts.PROJECT_MENDORA)
+(
+    CHOOSING_PROJECT,
+    CHOOSING_ROLE,
+    CHOOSING_ROLE_MENDORA,
+    ASKING_NAME,
+    ASKING_PHONE,
+    AWAITING_SUB,
+) = range(6)
 _SUBSCRIBED_STATUSES = {"member", "administrator", "creator"}
 _WARN_INTERVAL = 3600.0
 _channel_warn_at: dict[str, float] = {}
@@ -99,14 +107,35 @@ def _redact(text: str) -> str:
 
 def normalize_source(payload: str | None, previous: str | None = None) -> str:
     """Use a valid deep-link payload. Otherwise keep the stored source, else 'direct'."""
-    if payload:
-        cleaned = payload.strip().lower()
-        if _SOURCE_RE.fullmatch(cleaned):
-            return cleaned
+    _project, source = parse_start_payload(payload, previous)
+    return source
+
+
+def parse_start_payload(payload: str | None, previous: str | None = None) -> tuple[str | None, str]:
+    """Return (project or None, source).
+
+    ``safartrip_banner`` and ``mendora_flyer`` choose a project.
+    ``banner``, ``flyer``, ``vizitka``, and ``stend`` leave the project unset.
+    """
+    if not payload:
+        return None, previous or "direct"
+    cleaned = payload.strip().lower()
+    if not _SOURCE_RE.fullmatch(cleaned):
         logger.warning("Ignoring invalid /start payload")
+        return None, previous or "direct"
+    prefix, separator, rest = cleaned.partition("_")
+    if separator and prefix in _PROJECTS and rest and _SOURCE_RE.fullmatch(rest):
+        return prefix, rest
+    return None, cleaned
+
+
+def resolve_source(explicit: str | None, previous: str | None) -> str:
+    """A real QR payload wins. A plain /start keeps the source already stored."""
+    if explicit and explicit != "direct":
+        return explicit
     if previous:
         return previous
-    return "direct"
+    return explicit or "direct"
 
 
 def normalize_name(raw: str) -> str | None:
@@ -136,12 +165,37 @@ def _format_tashkent(utc_stamp: str) -> str:
     return moment.astimezone(TASHKENT).strftime("%d.%m.%Y %H:%M") + " (Toshkent)"
 
 
+def _project_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(texts.BTN_PROJECT_SAFARTRIP, callback_data="project:safartrip")],
+            [InlineKeyboardButton(texts.BTN_PROJECT_MENDORA, callback_data="project:mendora")],
+            [InlineKeyboardButton(texts.BTN_PROJECT_BOTH, callback_data="project:both")],
+        ]
+    )
+
+
 def _role_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton(texts.BTN_TRAVELER, callback_data=f"role:{texts.ROLE_TRAVELER}")],
             [InlineKeyboardButton(texts.BTN_OWNER, callback_data=f"role:{texts.ROLE_OWNER}")],
             [InlineKeyboardButton(texts.BTN_GUIDE, callback_data=f"role:{texts.ROLE_GUIDE}")],
+        ]
+    )
+
+
+def _mendora_role_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(texts.BTN_TEACHER, callback_data=f"role:{texts.ROLE_TEACHER}")],
+            [
+                InlineKeyboardButton(
+                    texts.BTN_SCHOOL_OWNER,
+                    callback_data=f"role:{texts.ROLE_SCHOOL_OWNER}",
+                )
+            ],
+            [InlineKeyboardButton(texts.BTN_STUDENT, callback_data=f"role:{texts.ROLE_STUDENT}")],
         ]
     )
 
@@ -154,10 +208,17 @@ def _phone_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def _site_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(texts.BTN_SITE, url=config.SITE_URL)]]
-    )
+def _site_keyboard(project: str = texts.PROJECT_SAFARTRIP) -> InlineKeyboardMarkup:
+    if project == texts.PROJECT_BOTH:
+        rows = [
+            [InlineKeyboardButton(texts.BTN_SITE, url=config.SITE_URL_SAFARTRIP)],
+            [InlineKeyboardButton(texts.BTN_SITE_MENDORA, url=config.SITE_URL_MENDORA)],
+        ]
+    elif project == texts.PROJECT_MENDORA:
+        rows = [[InlineKeyboardButton(texts.BTN_SITE_MENDORA, url=config.SITE_URL_MENDORA)]]
+    else:
+        rows = [[InlineKeyboardButton(texts.BTN_SITE, url=config.SITE_URL_SAFARTRIP)]]
+    return InlineKeyboardMarkup(rows)
 
 
 def _set_state(context: ContextTypes.DEFAULT_TYPE, state: int) -> None:
@@ -179,19 +240,27 @@ def membership_satisfies(member: object) -> bool:
     return status == "restricted" and getattr(member, "is_member", False) is True
 
 
-def _subscribe_keyboard() -> InlineKeyboardMarkup:
+def _channels_for(project: str, channels=None):
+    if channels is not None:
+        return channels
+    return config.channels_for(project)
+
+
+def _subscribe_keyboard(channels=None) -> InlineKeyboardMarkup:
+    chosen = config.channels_for(texts.PROJECT_SAFARTRIP) if channels is None else channels
     rows = [
         [InlineKeyboardButton(channel.title, url=channel.url)]
-        for channel in config.CHANNELS
+        for channel in chosen
     ]
     rows.append([InlineKeyboardButton(texts.BTN_CHECK, callback_data="sub:check")])
     return InlineKeyboardMarkup(rows)
 
 
-async def check_subscriptions(bot, user_id: int) -> list[str]:
+async def check_subscriptions(bot, user_id: int, channels=None) -> list[str]:
     """Return titles the user still needs to join. A failed lookup counts as joined."""
+    chosen = _channels_for(texts.PROJECT_SAFARTRIP, channels)
     missing: list[str] = []
-    for channel in config.CHANNELS:
+    for channel in chosen:
         try:
             member = await bot.get_chat_member(channel.chat, user_id)
         except Exception as exc:
@@ -227,8 +296,8 @@ async def _warn_channel_once(bot, channel) -> None:
         logger.error("Channel warning failed: %s", _redact(f"{type(exc).__name__}: {exc}"))
 
 
-async def _prompt_subscribe(message, *, remove_keyboard: bool) -> None:
-    markup = _subscribe_keyboard()
+async def _prompt_subscribe(message, *, remove_keyboard: bool, channels=None) -> None:
+    markup = _subscribe_keyboard(channels)
     if not remove_keyboard:
         await message.reply_text(texts.SUBSCRIBE_PROMPT, reply_markup=markup)
         return
@@ -246,13 +315,17 @@ async def _prompt_subscribe(message, *, remove_keyboard: bool) -> None:
         await message.reply_text(texts.SUBSCRIBE_PROMPT, reply_markup=markup)
 
 
-async def _notify_subscribed(context: ContextTypes.DEFAULT_TYPE, name: str) -> None:
+async def _notify_subscribed(
+    context: ContextTypes.DEFAULT_TYPE,
+    name: str,
+    project: str = texts.PROJECT_SAFARTRIP,
+) -> None:
     if config.ADMIN_CHAT_ID is None:
         return
     try:
         await context.bot.send_message(
             chat_id=config.ADMIN_CHAT_ID,
-            text=texts.admin_subscribed(name),
+            text=texts.admin_subscribed(name, project),
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
@@ -260,12 +333,12 @@ async def _notify_subscribed(context: ContextTypes.DEFAULT_TYPE, name: str) -> N
         logger.error("Subscription note failed: %s", _redact(f"{type(exc).__name__}: {exc}"))
 
 
-def _complete_lead(row: dict | None) -> bool:
+def _complete_lead(row: dict | None, project: str = texts.PROJECT_SAFARTRIP) -> bool:
     return bool(
         row
         and row.get("subscribed")
         and row.get("full_name")
-        and row.get("role") in texts.ROLES
+        and row.get("role") in texts.roles_for(project)
     )
 
 
@@ -277,22 +350,66 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
     payload = context.args[0] if context.args else None
-    previous = None
-    try:
-        existing = db.get_lead(user.id)
-    except Exception:
-        logger.exception("Could not read lead telegram_id=%s", user.id)
-        existing = None
-    if existing:
-        previous = existing.get("source")
-
-    if config.CHANNELS and _complete_lead(existing):
-        return await _recheck_returning(message, context, existing, user.id)
-
+    project, explicit = parse_start_payload(payload)
     context.user_data.clear()
-    context.user_data["source"] = normalize_source(payload, previous)
+    context.user_data["source_explicit"] = explicit
+    if project in _PROJECTS:
+        return await _enter_project(message, context, user.id, project)
+    _set_state(context, CHOOSING_PROJECT)
+    await message.reply_text(texts.PICK_PROJECT, reply_markup=_project_keyboard())
+    return CHOOSING_PROJECT
+
+
+async def _enter_project(message, context: ContextTypes.DEFAULT_TYPE, user_id: int, project: str) -> int:
+    explicit = context.user_data.get("source_explicit") or "direct"
+    try:
+        existing = db.get_lead(user_id, project)
+    except Exception:
+        logger.exception("Could not read lead telegram_id=%s project=%s", user_id, project)
+        existing = None
+    source = resolve_source(explicit, existing.get("source") if existing else None)
+    channels = config.channels_for(project)
+    context.user_data["project"] = project
+    context.user_data["source"] = source
+    if channels and _complete_lead(existing, project):
+        return await _recheck_returning(
+            message, context, existing, user_id, project=project, channels=channels
+        )
+    return await _ask_roles(message, context, project)
+
+
+async def _enter_both(message, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> int:
+    explicit = context.user_data.get("source_explicit") or "direct"
+    try:
+        safar = db.get_lead(user_id, texts.PROJECT_SAFARTRIP)
+        mendora = db.get_lead(user_id, texts.PROJECT_MENDORA)
+    except Exception:
+        logger.exception("Could not read leads telegram_id=%s", user_id)
+        safar = None
+        mendora = None
+    channels = config.channels_for(texts.PROJECT_BOTH)
+    context.user_data["project"] = texts.PROJECT_BOTH
+    context.user_data["source_explicit"] = explicit
+    if (
+        channels
+        and _complete_lead(safar, texts.PROJECT_SAFARTRIP)
+        and _complete_lead(mendora, texts.PROJECT_MENDORA)
+    ):
+        return await _recheck_both(message, context, safar, mendora, user_id, channels)
     _set_state(context, CHOOSING_ROLE)
     await message.reply_text(texts.GREETING, reply_markup=_role_keyboard())
+    return CHOOSING_ROLE
+
+
+async def _ask_roles(message, context: ContextTypes.DEFAULT_TYPE, project: str) -> int:
+    if project == texts.PROJECT_MENDORA:
+        text = texts.GREETING_MENDORA
+        markup = _mendora_role_keyboard()
+    else:
+        text = texts.GREETING
+        markup = _role_keyboard()
+    _set_state(context, CHOOSING_ROLE)
+    await message.reply_text(text, reply_markup=markup)
     return CHOOSING_ROLE
 
 
@@ -301,34 +418,103 @@ async def _recheck_returning(
     context: ContextTypes.DEFAULT_TYPE,
     existing: dict,
     user_id: int,
+    project: str = texts.PROJECT_SAFARTRIP,
+    channels=None,
 ) -> int:
     """Subscribed guests skip the form. A failed re-check shows the channel step again."""
     role = existing["role"]
     name = existing["full_name"]
+    source = context.user_data.get("source") or existing.get("source") or "direct"
+    chosen = _channels_for(project, channels)
     context.user_data.clear()
+    context.user_data["project"] = project
     context.user_data["role"] = role
     context.user_data["full_name"] = name
-    context.user_data["source"] = existing.get("source") or "direct"
+    context.user_data["source"] = source
     try:
-        missing = await check_subscriptions(context.bot, user_id)
+        missing = await check_subscriptions(context.bot, user_id, chosen)
     except Exception:
         logger.exception("Subscription re-check failed telegram_id=%s", user_id)
         missing = []
     if not missing:
         try:
-            await _deliver_thanks(message, role, name, remove_keyboard=False)
+            await _deliver_thanks(message, role, name, remove_keyboard=False, project=project)
         except Exception:
             logger.error("Thank-you message failed:\n%s", _redact(traceback.format_exc()))
             await message.reply_text(texts.ERROR)
         context.user_data.clear()
         return ConversationHandler.END
     try:
-        db.clear_subscription(user_id)
+        db.clear_subscription(user_id, project)
     except Exception:
         logger.exception("Could not clear subscription telegram_id=%s", user_id)
     _set_state(context, AWAITING_SUB)
-    await _prompt_subscribe(message, remove_keyboard=False)
+    await _prompt_subscribe(message, remove_keyboard=False, channels=chosen)
     return AWAITING_SUB
+
+
+async def _recheck_both(message, context, safar: dict, mendora: dict, user_id: int, channels) -> int:
+    name = safar["full_name"]
+    context.user_data["project"] = texts.PROJECT_BOTH
+    context.user_data["role"] = safar["role"]
+    context.user_data["role_safartrip"] = safar["role"]
+    context.user_data["role_mendora"] = mendora["role"]
+    context.user_data["full_name"] = name
+    try:
+        missing = await check_subscriptions(context.bot, user_id, channels)
+    except Exception:
+        logger.exception("Subscription re-check failed telegram_id=%s", user_id)
+        missing = []
+    if not missing:
+        try:
+            await _deliver_thanks(
+                message,
+                safar["role"],
+                name,
+                remove_keyboard=False,
+                project=texts.PROJECT_BOTH,
+                role_mendora=mendora["role"],
+            )
+        except Exception:
+            logger.error("Thank-you message failed:\n%s", _redact(traceback.format_exc()))
+            await message.reply_text(texts.ERROR)
+        context.user_data.clear()
+        return ConversationHandler.END
+    for project in _PROJECTS:
+        try:
+            db.clear_subscription(user_id, project)
+        except Exception:
+            logger.exception("Could not clear subscription telegram_id=%s", user_id)
+    _set_state(context, AWAITING_SUB)
+    await _prompt_subscribe(message, remove_keyboard=False, channels=channels)
+    return AWAITING_SUB
+
+
+async def on_project(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or query.data is None or user is None:
+        return CHOOSING_PROJECT
+    await query.answer()
+    choice = query.data.split(":", 1)[1]
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        logger.info("Project keyboard was already cleared")
+    if query.message is None:
+        return ConversationHandler.END
+    if choice == texts.PROJECT_BOTH:
+        return await _enter_both(query.message, context, user.id)
+    if choice not in _PROJECTS:
+        return CHOOSING_PROJECT
+    return await _enter_project(query.message, context, user.id, choice)
+
+
+async def _clear_inline(query) -> None:
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        logger.info("Role keyboard was already cleared")
 
 
 async def on_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -337,15 +523,37 @@ async def on_role(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return CHOOSING_ROLE
     await query.answer()
     role = query.data.split(":", 1)[1]
-    if role not in texts.ROLES:
+    project = context.user_data.get("project") or texts.PROJECT_SAFARTRIP
+    if project == texts.PROJECT_BOTH and "role_safartrip" not in context.user_data:
+        if role not in texts.SAFAR_ROLES:
+            _set_state(context, CHOOSING_ROLE)
+            return CHOOSING_ROLE
+        context.user_data["role_safartrip"] = role
+        context.user_data["role"] = role
+        await _clear_inline(query)
+        _set_state(context, CHOOSING_ROLE_MENDORA)
+        if query.message is not None:
+            await query.message.reply_text(
+                texts.GREETING_MENDORA,
+                reply_markup=_mendora_role_keyboard(),
+            )
+        return CHOOSING_ROLE_MENDORA
+    if project == texts.PROJECT_BOTH:
+        if role not in texts.MENDORA_ROLES:
+            _set_state(context, CHOOSING_ROLE_MENDORA)
+            return CHOOSING_ROLE_MENDORA
+        context.user_data["role_mendora"] = role
+        await _clear_inline(query)
+        _set_state(context, ASKING_NAME)
+        if query.message is not None:
+            await query.message.reply_text(texts.ASK_NAME, reply_markup=ReplyKeyboardRemove())
+        return ASKING_NAME
+    if role not in texts.roles_for(project):
         _set_state(context, CHOOSING_ROLE)
         return CHOOSING_ROLE
     context.user_data["role"] = role
+    await _clear_inline(query)
     _set_state(context, ASKING_NAME)
-    try:
-        await query.edit_message_reply_markup(reply_markup=None)
-    except Exception:
-        logger.info("Role keyboard was already cleared")
     if query.message is not None:
         await query.message.reply_text(texts.ASK_NAME, reply_markup=ReplyKeyboardRemove())
     return ASKING_NAME
@@ -389,16 +597,28 @@ async def on_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     if query is None or user is None:
         return AWAITING_SUB
+    project = context.user_data.get("project") or texts.PROJECT_SAFARTRIP
     role = context.user_data.get("role")
+    role_mendora = context.user_data.get("role_mendora")
     name = context.user_data.get("full_name")
-    if role not in texts.ROLES or not name:
+    valid = bool(name) and (
+        (
+            project == texts.PROJECT_BOTH
+            and role in texts.SAFAR_ROLES
+            and role_mendora in texts.MENDORA_ROLES
+        )
+        or (project != texts.PROJECT_BOTH and role in texts.roles_for(project))
+    )
+    if not valid:
         await query.answer()
         if query.message is not None:
             await query.message.reply_text(texts.ERROR)
         context.user_data.clear()
         return ConversationHandler.END
     try:
-        missing = await check_subscriptions(context.bot, user.id)
+        missing = await check_subscriptions(
+            context.bot, user.id, config.channels_for(project)
+        )
     except Exception:
         logger.exception("Subscription check failed telegram_id=%s", user.id)
         missing = []
@@ -406,9 +626,11 @@ async def on_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await query.answer(texts.missing_channels_alert(missing), show_alert=True)
         return AWAITING_SUB
     await query.answer()
+    targets = _PROJECTS if project == texts.PROJECT_BOTH else (project,)
     try:
-        if db.mark_subscribed(user.id):
-            await _notify_subscribed(context, name)
+        for item in targets:
+            if db.mark_subscribed(user.id, item):
+                await _notify_subscribed(context, name, item)
     except Exception:
         logger.exception("Could not mark subscription telegram_id=%s", user.id)
     if query.message is not None:
@@ -420,7 +642,14 @@ async def on_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         except Exception:
             logger.info("Could not edit the subscription message")
         try:
-            await _deliver_thanks(query.message, role, name, remove_keyboard=False)
+            await _deliver_thanks(
+                query.message,
+                role,
+                name,
+                remove_keyboard=False,
+                project=project,
+                role_mendora=role_mendora,
+            )
         except Exception:
             logger.error("Thank-you message failed:\n%s", _redact(traceback.format_exc()))
             await query.message.reply_text(texts.ERROR)
@@ -449,52 +678,80 @@ async def _finish(
 ) -> int:
     message = update.effective_message
     user = update.effective_user
+    project = context.user_data.get("project") or texts.PROJECT_SAFARTRIP
     role = context.user_data.get("role")
+    role_mendora = context.user_data.get("role_mendora")
     name = context.user_data.get("full_name")
-    source = context.user_data.get("source") or "direct"
-    if message is None or user is None or role not in texts.ROLES or not name:
+    if project == texts.PROJECT_BOTH:
+        role = context.user_data.get("role_safartrip") or role
+        pairs_ok = role in texts.SAFAR_ROLES and role_mendora in texts.MENDORA_ROLES
+        pairs = (
+            (texts.PROJECT_SAFARTRIP, role),
+            (texts.PROJECT_MENDORA, role_mendora),
+        )
+    else:
+        pairs_ok = role in texts.roles_for(project)
+        pairs = ((project, role),)
+    if message is None or user is None or not pairs_ok or not name:
         if message is not None:
             await message.reply_text(texts.ERROR)
         context.user_data.clear()
         return ConversationHandler.END
 
+    explicit = context.user_data.get("source_explicit") or context.user_data.get("source") or "direct"
     try:
-        is_new, updated_at = db.upsert_lead(
-            telegram_id=user.id,
-            username=user.username,
-            full_name=name,
-            tg_name=_tg_name(user),
-            phone=phone,
-            role=role,
-            source=source,
-        )
+        for item_project, item_role in pairs:
+            if project == texts.PROJECT_BOTH:
+                try:
+                    existing = db.get_lead(user.id, item_project)
+                except Exception:
+                    existing = None
+                source = resolve_source(
+                    explicit,
+                    existing.get("source") if existing else None,
+                )
+            else:
+                source = context.user_data.get("source") or "direct"
+            is_new, updated_at = db.upsert_lead(
+                telegram_id=user.id,
+                username=user.username,
+                full_name=name,
+                tg_name=_tg_name(user),
+                phone=phone,
+                role=item_role,
+                source=source,
+                project=item_project,
+            )
+            logger.info(
+                "Saved lead telegram_id=%s project=%s role=%s source=%s new=%s",
+                user.id,
+                item_project,
+                item_role,
+                source,
+                is_new,
+            )
+            await _notify_admin(
+                context,
+                is_new=is_new,
+                role=item_role,
+                full_name=name,
+                username=user.username,
+                phone=phone,
+                source=source,
+                updated_at=updated_at,
+                project=item_project,
+            )
     except Exception:
         logger.exception("Could not save lead telegram_id=%s", user.id)
         await message.reply_text(texts.ERROR)
         context.user_data.clear()
         return ConversationHandler.END
 
-    logger.info(
-        "Saved lead telegram_id=%s role=%s source=%s new=%s",
-        user.id,
-        role,
-        source,
-        is_new,
-    )
-    await _notify_admin(
-        context,
-        is_new=is_new,
-        role=role,
-        full_name=name,
-        username=user.username,
-        phone=phone,
-        source=source,
-        updated_at=updated_at,
-    )
-    if config.CHANNELS:
+    channels = config.channels_for(project)
+    if channels:
         _set_state(context, AWAITING_SUB)
         try:
-            await _prompt_subscribe(message, remove_keyboard=remove_keyboard)
+            await _prompt_subscribe(message, remove_keyboard=remove_keyboard, channels=channels)
         except Exception:
             logger.error("Subscription prompt failed:\n%s", _redact(traceback.format_exc()))
             await message.reply_text(texts.ERROR)
@@ -502,7 +759,14 @@ async def _finish(
             return ConversationHandler.END
         return AWAITING_SUB
     try:
-        await _deliver_thanks(message, role, name, remove_keyboard=remove_keyboard)
+        await _deliver_thanks(
+            message,
+            role,
+            name,
+            remove_keyboard=remove_keyboard,
+            project=project,
+            role_mendora=role_mendora,
+        )
     except Exception:
         logger.error("Thank-you message failed:\n%s", _redact(traceback.format_exc()))
         try:
@@ -513,8 +777,44 @@ async def _finish(
     return ConversationHandler.END
 
 
-async def _deliver_thanks(message, role: str, name: str, *, remove_keyboard: bool) -> None:
-    text = texts.thanks_for(role, name, config.PROMO_CODE, config.PROMO_TEXT)
+async def _deliver_thanks(
+    message,
+    role: str,
+    name: str,
+    *,
+    remove_keyboard: bool,
+    project: str = texts.PROJECT_SAFARTRIP,
+    role_mendora: str | None = None,
+) -> None:
+    if project == texts.PROJECT_BOTH:
+        text = texts.thanks_both(
+            name=name,
+            safar_role=role,
+            mendora_role=role_mendora or "",
+            safar_promo=config.PROMO_CODE_SAFARTRIP,
+            safar_promo_text=config.PROMO_TEXT_SAFARTRIP,
+            mendora_promo=config.PROMO_CODE_MENDORA,
+            mendora_promo_text=config.PROMO_TEXT_MENDORA,
+            contact_safar=config.CONTACT_SAFARTRIP,
+            contact_mendora=config.CONTACT_MENDORA,
+        )
+    elif project == texts.PROJECT_MENDORA:
+        text = texts.thanks_mendora(
+            name,
+            role,
+            config.PROMO_CODE_MENDORA,
+            config.PROMO_TEXT_MENDORA,
+            config.CONTACT_MENDORA,
+        )
+    else:
+        text = texts.thanks_for(
+            role,
+            name,
+            config.PROMO_CODE_SAFARTRIP,
+            config.PROMO_TEXT_SAFARTRIP,
+            config.CONTACT_SAFARTRIP,
+        )
+    markup = _site_keyboard(project)
     preview = {"disable_web_page_preview": True}
     if remove_keyboard:
         await message.reply_text(
@@ -524,14 +824,14 @@ async def _deliver_thanks(message, role: str, name: str, *, remove_keyboard: boo
             **preview,
         )
         try:
-            await message.reply_text(texts.SITE_HINT, reply_markup=_site_keyboard())
+            await message.reply_text(texts.SITE_HINT, reply_markup=markup)
         except Exception as exc:
             logger.error("Site button failed: %s", _redact(f"{type(exc).__name__}: {exc}"))
         return
     await message.reply_text(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=_site_keyboard(),
+        reply_markup=markup,
         **preview,
     )
 
@@ -546,6 +846,7 @@ async def _notify_admin(
     phone: str | None,
     source: str,
     updated_at: str,
+    project: str = texts.PROJECT_SAFARTRIP,
 ) -> None:
     if config.ADMIN_CHAT_ID is None:
         return
@@ -557,6 +858,7 @@ async def _notify_admin(
         phone=phone,
         source=source,
         when=_format_tashkent(updated_at),
+        project=project,
     )
     try:
         await context.bot.send_message(
@@ -609,6 +911,7 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             data["by_role"],
             data["by_source"],
             subscribed=data["subscribed"],
+            projects=data["projects"],
         ),
         parse_mode=ParseMode.HTML,
     )
@@ -669,11 +972,19 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def build_application() -> Application:
-    role_handler = CallbackQueryHandler(on_role, pattern=r"^role:(traveler|owner|guide)$")
+    project_handler = CallbackQueryHandler(
+        on_project, pattern=r"^project:(safartrip|mendora|both)$"
+    )
+    role_handler = CallbackQueryHandler(
+        on_role,
+        pattern=r"^role:(traveler|owner|guide|teacher|school_owner|student)$",
+    )
     conversation = ConversationHandler(
         entry_points=[CommandHandler("start", start, filters=filters.ChatType.PRIVATE)],
         states={
+            CHOOSING_PROJECT: [project_handler],
             CHOOSING_ROLE: [role_handler],
+            CHOOSING_ROLE_MENDORA: [role_handler],
             ASKING_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, on_name),
                 role_handler,
@@ -717,10 +1028,11 @@ def main() -> None:
         logger.warning("ADMIN_CHAT_ID is empty; new leads will not be forwarded")
     if not config.ADMIN_IDS:
         logger.warning("ADMIN_IDS is empty; /stats and /export are disabled")
-    if config.CHANNELS:
+    active = config.channels_for(texts.PROJECT_BOTH)
+    if active:
         logger.info(
             "Subscription channels: %s",
-            ", ".join(channel.title for channel in config.CHANNELS),
+            ", ".join(channel.title for channel in active),
         )
     else:
         logger.info("Subscription step is off")

@@ -1,6 +1,6 @@
 # SafarTrip lead bot
 
-Telegram bot that collects leads at a SafarTrip stand. Guests pick a role, leave a name, and (only if they have no @username) share a phone number. Each new or updated lead is sent to an admin group. The guest sees a short thank-you in Uzbek.
+Telegram bot that collects leads at one stand for two projects: SafarTrip (tourism) and Mendora (an AI workspace for teachers, mendora.tech). Guests pick a project, then a role, leave a name, and (only if they have no @username) share a phone number. Each new or updated lead is sent to an admin group. The guest sees a short thank-you in Uzbek.
 
 Python 3.11, [python-telegram-bot](https://docs.python-telegram-bot.org/) 20.7, polling (no webhook).
 
@@ -58,19 +58,32 @@ Stop the process with Ctrl+C.
 | `BOT_TOKEN` | yes | | Token from BotFather |
 | `ADMIN_CHAT_ID` | yes for alerts | | Group chat that receives every lead |
 | `ADMIN_IDS` | yes for admin commands | | Comma-separated Telegram user ids, e.g. `111,222` |
-| `PROMO_CODE` | no | `SCHOOL21` | Shown to travelers |
-| `PROMO_TEXT` | no | `Birinchi bronga chegirma` | Line under the promo code |
-| `SITE_URL` | no | `https://safartrip.uz` | Inline button on the thank-you |
+| `PROMO_CODE` | no | `SCHOOL21` | SafarTrip fallback for `PROMO_CODE_SAFARTRIP` |
+| `PROMO_TEXT` | no | `Birinchi bronga chegirma` | SafarTrip fallback for `PROMO_TEXT_SAFARTRIP` |
+| `SITE_URL` | no | `https://safartrip.uz` | SafarTrip fallback for `SITE_URL_SAFARTRIP` |
 | `DB_PATH` | no | `leads.db` | SQLite file path |
-| `CHANNELS` | no | empty | Channels the guest must join before the thank-you |
+| `CHANNELS` | no | empty | SafarTrip fallback when `CHANNELS_SAFARTRIP` is empty |
+| `SITE_URL_SAFARTRIP` | no | `https://safartrip.uz` | SafarTrip thank-you button |
+| `SITE_URL_MENDORA` | no | `https://mendora.tech` | Mendora thank-you button |
+| `PROMO_CODE_SAFARTRIP` | no | `SCHOOL21` | Shown to SafarTrip travelers after the channel check |
+| `PROMO_TEXT_SAFARTRIP` | no | `Birinchi bronga chegirma` | Line under the SafarTrip promo code |
+| `PROMO_CODE_MENDORA` | no | empty | Mendora promo. Empty means the promo block is omitted |
+| `PROMO_TEXT_MENDORA` | no | empty | Line under the Mendora promo code |
+| `CHANNELS_SAFARTRIP` | no | empty | SafarTrip channels. Falls back to `CHANNELS` |
+| `CHANNELS_MENDORA` | no | empty | Mendora channels |
+| `CONTACT_SAFARTRIP` | no | `@anvarovic06` | Link on the SafarTrip thank-you |
+| `CONTACT_MENDORA` | no | `@sz_2302` | Link on the Mendora thank-you |
 
 `created_at` and `updated_at` are stored in UTC. `/stats` counts "today" in Asia/Tashkent (UTC+5).
 
-`CHANNELS` is a comma-separated list. Each entry is `chat|Title` or `chat|Title|invite_url`. `chat` is `@username` or a numeric id such as `-1001234567890`. Titles cannot contain `|` or `,`. If the invite URL is omitted, the bot builds `https://t.me/<username>` from the `@username`. A numeric id needs an invite URL. Leave `CHANNELS` empty to skip the step.
+Channel lists use the same format. Each entry is `chat|Title` or `chat|Title|invite_url`. `chat` is `@username` or a numeric id such as `-1001234567890`. Titles cannot contain `|` or `,`. If the invite URL is omitted, the bot builds `https://t.me/<username>` from the `@username`. A numeric id needs an invite URL. Leave a list empty to skip that project's step. "Ikkalasi" checks the union of both lists. The same chat is asked only once.
 
 ```
-CHANNELS=@safartrip_uz|SafarTrip,@mendora_en|Mendora,-1001234567890|Yopiq kanal|https://t.me/+AbCdEf
+CHANNELS_SAFARTRIP=@safartrip_uz|SafarTrip
+CHANNELS_MENDORA=@mendora_en|Mendora,-1001234567890|Yopiq kanal|https://t.me/+AbCdEf
 ```
+
+`CHANNELS`, `PROMO_CODE`, `PROMO_TEXT`, and `SITE_URL` still work as SafarTrip fallbacks, so an existing Render service does not have to be reconfigured.
 
 ## Render Background Worker
 
@@ -95,7 +108,7 @@ INFO bot Subscription step is off
 INFO bot SafarTrip lead bot is polling
 ```
 
-`Subscription step is off` appears only when `CHANNELS` is empty. With channels configured, that line lists their titles instead. If the log says `Unsupported Python version, expected 3.11`, the service is not on 3.11.x: set `PYTHON_VERSION=3.11.9` and clear the build cache.
+`Subscription step is off` appears only when both channel lists are empty. With channels configured, that line lists their titles instead. If the log says `Unsupported Python version, expected 3.11`, the service is not on 3.11.x: set `PYTHON_VERSION=3.11.9` and clear the build cache.
 
 Render's disk is ephemeral: a new deploy or restart can wipe `leads.db`. The admin group message is the source of truth. Use `/export` during the event if you want a file. A paid persistent disk is optional; if you attach one, set `DB_PATH` to a path on that disk (for example `/var/data/leads.db`).
 
@@ -117,29 +130,35 @@ Then message the bot in private, finish the flow, and check that the group recei
 
 ## Deep links for QR codes
 
-Put the full URL into any QR generator. The text after `start=` is stored as the lead source.
+Put the full URL into any QR generator. The payload is `<project>_<source>`. A payload without a project opens the chooser and stores that word as the source.
 
-- Banner: `https://t.me/YOUR_BOT_USERNAME?start=banner`
-- Flyer: `https://t.me/YOUR_BOT_USERNAME?start=flyer`
-- Business card: `https://t.me/YOUR_BOT_USERNAME?start=vizitka`
-- Stand: `https://t.me/YOUR_BOT_USERNAME?start=stend`
+| QR | Link |
+| --- | --- |
+| SafarTrip banner | `https://t.me/YOUR_BOT_USERNAME?start=safartrip_banner` |
+| SafarTrip flyer | `https://t.me/YOUR_BOT_USERNAME?start=safartrip_flyer` |
+| SafarTrip stand | `https://t.me/YOUR_BOT_USERNAME?start=safartrip_stend` |
+| Mendora banner | `https://t.me/YOUR_BOT_USERNAME?start=mendora_banner` |
+| Mendora flyer | `https://t.me/YOUR_BOT_USERNAME?start=mendora_flyer` |
+| Mendora stand | `https://t.me/YOUR_BOT_USERNAME?start=mendora_stend` |
+| Choose a project | `https://t.me/YOUR_BOT_USERNAME?start=stend` |
 
-A plain `/start`, or an invalid payload, is stored as `direct`. Opening the bot again without a new payload keeps the previous source, so a later visit does not overwrite `stend` with `direct`.
+`banner`, `flyer`, and `vizitka` also open the chooser. A plain `/start`, or an invalid payload, is stored as `direct` and opens the chooser. Opening the bot again without a new payload keeps the previous source for that project, so a later visit does not overwrite `stend` with `direct`.
 
 ## What the guest does
 
-1. `/start` — short greeting and three buttons: traveler, property owner, guide.
-2. Types their name (2–60 characters).
-3. Telegram id and @username are saved automatically. A phone button appears only when there is no @username.
-4. The lead is saved and forwarded to the admin group.
-5. If `CHANNELS` is set, the guest joins those channels and presses «✅ Tekshirish». The promo code is shown only after that check, and only to travelers. Owners and guides get their usual thank-you. If `CHANNELS` is empty, the thank-you (including the traveler promo) is sent immediately.
-6. A guest already marked subscribed who presses `/start` is checked again. Still subscribed: the thank-you, with no form. Missing a channel: the channel buttons again.
-7. Someone who has not subscribed yet can press `/start` again. The same row is updated (latest role, name, and source). It does not create a second row.
-8. `/cancel` stops the current step. Any other unexpected message tells them to press `/start`.
+1. `/start` with a project payload goes straight to that project's roles. Without one, three buttons: SafarTrip, Mendora, or both.
+2. SafarTrip roles: traveler, property owner, guide. Mendora roles: teacher, school or learning-center owner, student. "Ikkalasi" asks the SafarTrip role, then the Mendora role.
+3. Types their name once (2–60 characters).
+4. Telegram id and @username are saved automatically. A phone button appears only when there is no @username, and only once.
+5. One row is saved per project and forwarded to the admin group. "Ikkalasi" writes two rows and sends two lead cards.
+6. If that project's channels are set, the guest joins them and presses «✅ Tekshirish». "Ikkalasi" uses the union of both lists. The SafarTrip promo is shown only after that check, and only to travelers. Mendora shows a promo only when `PROMO_CODE_MENDORA` is set. School owners also see that the team will contact them. If the channel list is empty, the thank-you is sent immediately.
+7. A guest already marked subscribed for that project who presses `/start` is checked again. Still subscribed: the thank-you, with no form. Missing a channel: the channel buttons again.
+8. Someone who has not subscribed yet can press `/start` again. The same project row is updated (latest role, name, and source). It does not create a second row for that project. The other project is a separate row.
+9. `/cancel` stops the current step. Any other unexpected message tells them to press `/start`.
 
 ## Channel subscription
 
-Add the bot as an **administrator** of every channel in `CHANNELS`. No extra rights are required: posting, editing, and deleting can all stay off. `getChatMember` works once the bot is an admin.
+Add the bot as an **administrator** of every channel in `CHANNELS_SAFARTRIP`, `CHANNELS_MENDORA`, or the `CHANNELS` fallback. No extra rights are required: posting, editing, and deleting can all stay off. `getChatMember` works once the bot is an admin.
 
 If a check fails (the bot is not an admin, the id is wrong, or Telegram errors), that channel counts as joined so a guest at the stand is not stuck. The admin group receives one warning per channel per hour: `⚠️ <title> tekshirib bo'lmadi: bot kanalga admin emas yoki ID noto'g'ri`.
 
@@ -150,7 +169,7 @@ If a check fails (the bot is not an admin, the id is wrong, or Telegram errors),
 3. Open `https://api.telegram.org/bot<BOT_TOKEN>/getUpdates`.
 4. Find `"channel_post" → "chat" → "id"`. It looks like `-100xxxxxxxxxx`.
 5. In the channel info, create an invite link (`https://t.me/+...`).
-6. Use `-100xxxxxxxxxx|Yopiq kanal|https://t.me/+AbCdEf` in `CHANNELS`.
+6. Use `-100xxxxxxxxxx|Yopiq kanal|https://t.me/+AbCdEf` in the channel list.
 
 Public channels can use `@username|Title` with no invite link.
 
@@ -158,20 +177,22 @@ Public channels can use `@username|Title` with no invite link.
 
 Only user ids in `ADMIN_IDS` can use these. Everyone else is ignored, with no reply.
 
-- `/stats` — total leads, today's leads (Tashkent), subscribed count and percent, counts by role and by source.
-- `/export` — all leads as `safartrip_leads.csv` (UTF-8 with BOM, so Excel shows Uzbek letters), including `subscribed` and `subscribed_at`.
+- `/stats` — total leads, today's leads (Tashkent), subscribed count and percent, then the same breakdown inside each project (role and source).
+- `/export` — all leads as `safartrip_leads.csv` (UTF-8 with BOM, so Excel shows Uzbek letters), including `project`, `subscribed`, and `subscribed_at`. Lead cards and subscription notes show 🌍 SafarTrip or 🎓 Mendora.
 
 Commands work in private chat and in the admin group.
 
 ## Test checklist
 
-1. Bot is an admin of each channel, then restart after setting `CHANNELS`.
-2. New traveler: the admin group gets the lead card, and the chat does not show the promo yet.
-3. «✅ Tekshirish» before joining shows an alert with the missing titles. The same buttons stay. There is no skip.
-4. After joining, «✅ Tekshirish» confirms the subscription and then shows the promo for a traveler.
-5. `/start` again shows the thank-you directly. Leave a channel, press `/start`, and the channel step returns.
-6. `/stats` shows `Obuna`. `/export` includes `subscribed` and `subscribed_at`.
-7. With `CHANNELS` empty, `/start` ends on the thank-you as before.
+1. Bot is an admin of each channel, then restart after setting the channel lists.
+2. `?start=stend` shows the project chooser. `?start=safartrip_stend` opens SafarTrip roles. `?start=mendora_stend` opens Mendora roles.
+3. New traveler: the admin group gets a SafarTrip lead card, and the chat does not show the promo yet.
+4. «✅ Tekshirish» before joining shows an alert with the missing titles. The same buttons stay. There is no skip.
+5. After joining, «✅ Tekshirish» confirms the subscription and then shows the promo for a traveler.
+6. `/start` again for the same project shows the thank-you directly. Leave a channel, press `/start`, and the channel step returns.
+7. "Ikkalasi" asks both role sets, the name once, stores two rows, and sends one combined thank-you.
+8. `/stats` shows `Obuna` and a block per project. `/export` includes `project`.
+9. With both channel lists empty, `/start` ends on the thank-you as before. Mendora shows no promo while `PROMO_CODE_MENDORA` is empty.
 
 ```bash
 python -m unittest test_subscription.py

@@ -384,5 +384,307 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(app.handlers[0]), 5)
 
 
+class PayloadTests(unittest.TestCase):
+    def test_project_legacy_and_plain_start(self) -> None:
+        from bot import parse_start_payload, resolve_source
+
+        self.assertEqual(parse_start_payload("safartrip_banner"), ("safartrip", "banner"))
+        self.assertEqual(parse_start_payload("mendora_flyer"), ("mendora", "flyer"))
+        self.assertEqual(parse_start_payload("safartrip_stend"), ("safartrip", "stend"))
+        self.assertEqual(parse_start_payload("mendora_stend"), ("mendora", "stend"))
+        self.assertEqual(parse_start_payload("stend"), (None, "stend"))
+        self.assertEqual(parse_start_payload("banner"), (None, "banner"))
+        self.assertEqual(parse_start_payload("vizitka"), (None, "vizitka"))
+        self.assertEqual(parse_start_payload(None), (None, "direct"))
+        self.assertEqual(parse_start_payload("NOT valid"), (None, "direct"))
+        self.assertEqual(resolve_source("direct", "stend"), "stend")
+        self.assertEqual(resolve_source("flyer", "stend"), "flyer")
+
+    def test_buttons_fit_telegram_limit(self) -> None:
+        labels = (
+            texts.BTN_PROJECT_SAFARTRIP,
+            texts.BTN_PROJECT_MENDORA,
+            texts.BTN_PROJECT_BOTH,
+            texts.BTN_TEACHER,
+            texts.BTN_SCHOOL_OWNER,
+            texts.BTN_STUDENT,
+            texts.BTN_OWNER,
+        )
+        for label in labels:
+            width = len(label.encode("utf-16-le")) // 2
+            self.assertLessEqual(width, 64, label)
+        self.assertEqual(texts.BTN_PROJECT_SAFARTRIP, "✈️ SafarTrip (sayohat)")
+        self.assertEqual(texts.BTN_PROJECT_MENDORA, "🎓 Mendora (o'qituvchilar uchun AI)")
+        self.assertEqual(texts.BTN_PROJECT_BOTH, "✨ Ikkalasi ham qiziq")
+        self.assertEqual(texts.BTN_TEACHER, "👩‍🏫 O'qituvchiman")
+        self.assertEqual(texts.BTN_SCHOOL_OWNER, "🏫 Maktab yoki o'quv markaz rahbariman")
+        self.assertEqual(texts.BTN_STUDENT, "🎓 Talaba / boshqa")
+
+
+class CopyTests(unittest.TestCase):
+    def test_mendora_hides_empty_promo_and_school_owner_gets_pilot(self) -> None:
+        teacher = texts.thanks_mendora("Ali", "teacher", "", "", "@sz_2302")
+        self.assertIn("dars rejasi, taqdimot, test va jonli viktorina bir joyda", teacher)
+        self.assertNotIn("Promo-kod", teacher)
+        self.assertNotIn("Jamoamiz siz bilan bog'lanadi", teacher)
+        self.assertIn("t.me/sz_2302", teacher)
+        owner = texts.thanks_mendora("Ali", "school_owner", "", "", "@sz_2302")
+        self.assertIn("Jamoamiz siz bilan bog'lanadi", owner)
+        with_promo = texts.thanks_mendora("Ali", "student", "PILOT", "sinov", "@sz_2302")
+        self.assertIn("PILOT", with_promo)
+
+    def test_safartrip_thank_you_is_unchanged(self) -> None:
+        text = texts.thanks_traveler("Ali", "SCHOOL21", "Birinchi bronga chegirma")
+        self.assertIn("SCHOOL21", text)
+        self.assertIn("Birinchi bronga chegirma", text)
+        self.assertIn('href="https://t.me/anvarovic06"', text)
+        self.assertIn("asoschiga yozing", text)
+
+
+class ChannelRoutingTests(unittest.TestCase):
+    def test_fallback_and_union(self) -> None:
+        import config
+
+        safar = Channel("@safartrip_uz", "SafarTrip", "https://t.me/safartrip_uz")
+        mendora = Channel("@mendora_en", "Mendora", "https://t.me/mendora_en")
+        shared = Channel("@safartrip_uz", "SafarTrip again", "https://t.me/safartrip_uz")
+        with (
+            patch("config.CHANNELS", (safar,)),
+            patch("config.CHANNELS_SAFARTRIP", ()),
+            patch("config.CHANNELS_MENDORA", ()),
+        ):
+            self.assertEqual(config.channels_for("safartrip"), (safar,))
+        with (
+            patch("config.CHANNELS", ()),
+            patch("config.CHANNELS_SAFARTRIP", (safar,)),
+            patch("config.CHANNELS_MENDORA", (shared, mendora)),
+        ):
+            merged = config.channels_for("both")
+            self.assertEqual([item.chat for item in merged], ["@safartrip_uz", "@mendora_en"])
+            self.assertEqual(merged[0].title, "SafarTrip")
+
+
+class ProjectStorageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.directory.name, "leads.db")
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def _lead(self, **overrides) -> None:
+        fields = {
+            "telegram_id": 7,
+            "username": "ali",
+            "full_name": "Ali",
+            "tg_name": "Ali",
+            "phone": None,
+            "role": "traveler",
+            "source": "stend",
+            "project": "safartrip",
+        }
+        fields.update(overrides)
+        db.upsert_lead(**fields)
+
+    def test_same_project_updates_and_other_project_inserts(self) -> None:
+        db.init_db(self.path)
+        self._lead()
+        self._lead(full_name="Vali", role="guide", source="flyer")
+        self._lead(project="mendora", role="school_owner", source="flyer", full_name="Vali")
+        self.assertEqual(db.get_lead(7)["full_name"], "Vali")
+        self.assertEqual(db.get_lead(7)["role"], "guide")
+        self.assertEqual(db.get_lead(7, "mendora")["role"], "school_owner")
+        self.assertEqual(db.get_lead(7)["subscribed"], 0)
+        payload, count = db.export_csv()
+        header = payload.decode("utf-8-sig").replace("\r\n", "\n").split("\n")[0]
+        self.assertEqual(count, 2)
+        self.assertIn(",project,", f",{header},")
+        self.assertIn("subscribed,subscribed_at", header)
+        data = db.stats("2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z")
+        self.assertEqual([item["project"] for item in data["projects"]], ["safartrip", "mendora"])
+        message = texts.stats_message(
+            data["total"],
+            data["today"],
+            data["by_role"],
+            data["by_source"],
+            subscribed=data["subscribed"],
+            projects=data["projects"],
+        )
+        self.assertIn("SafarTrip", message)
+        self.assertIn("Mendora", message)
+        self.assertIn("Obuna", message)
+
+    def test_rebuild_keeps_subscription_and_adds_a_second_project(self) -> None:
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            """
+            CREATE TABLE leads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL UNIQUE,
+                username TEXT,
+                full_name TEXT NOT NULL,
+                tg_name TEXT,
+                phone TEXT,
+                role TEXT NOT NULL,
+                source TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                subscribed INTEGER DEFAULT 0,
+                subscribed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO leads (
+                telegram_id, username, full_name, tg_name, phone, role, source,
+                created_at, updated_at, subscribed, subscribed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (7, "ali", "G'anisher", "Ali", None, "traveler", "stend", "t0", "t0", 1, "stamp"),
+        )
+        conn.commit()
+        conn.close()
+        db.init_db(self.path)
+        db.init_db(self.path)
+        row = db.get_lead(7)
+        assert row is not None
+        self.assertEqual(row["full_name"], "G'anisher")
+        self.assertEqual(row["project"], "safartrip")
+        self.assertEqual(row["subscribed"], 1)
+        self.assertEqual(row["subscribed_at"], "stamp")
+        self.assertEqual(row["id"], 1)
+        self._lead(project="mendora", role="teacher", full_name="G'anisher")
+        self.assertEqual(db.get_lead(7)["subscribed_at"], "stamp")
+        self.assertEqual(db.get_lead(7, "mendora")["subscribed"], 0)
+        _payload, count = db.export_csv()
+        self.assertEqual(count, 2)
+
+
+class BothFlowTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.directory.name, "leads.db")
+        db.init_db(self.path)
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def _context(self, bot):
+        return SimpleNamespace(args=[], user_data={}, bot=bot)
+
+    def _user(self):
+        return SimpleNamespace(id=7, username="ali", first_name="Ali", last_name=None)
+
+    def _message(self, person, replies: list):
+        async def reply_text(text, **kwargs):
+            replies.append({"text": text, **kwargs})
+            return self._message(person, replies)
+
+        message = SimpleNamespace(text=None, from_user=person, reply_text=reply_text)
+        return message
+
+    async def test_both_stores_two_rows_and_one_thank_you(self) -> None:
+        from bot import ConversationHandler, _finish
+
+        person = self._user()
+        replies: list = []
+        bot = _FakeBot({})
+        context = self._context(bot)
+        context.user_data.update(
+            {
+                "project": "both",
+                "role": "traveler",
+                "role_safartrip": "traveler",
+                "role_mendora": "school_owner",
+                "full_name": "Ali",
+                "source_explicit": "stend",
+            }
+        )
+        update = SimpleNamespace(effective_message=self._message(person, replies), effective_user=person)
+        with (
+            patch("config.CHANNELS", ()),
+            patch("config.CHANNELS_SAFARTRIP", ()),
+            patch("config.CHANNELS_MENDORA", ()),
+            patch("config.PROMO_CODE_MENDORA", ""),
+            patch("config.ADMIN_CHAT_ID", -100),
+        ):
+            state = await _finish(update, context, phone=None, remove_keyboard=False)
+        self.assertEqual(state, ConversationHandler.END)
+        blob = " ".join(item.get("text", "") for item in replies)
+        self.assertEqual(sum("Rahmat" in item.get("text", "") for item in replies), 1)
+        self.assertIn("SCHOOL21", blob)
+        self.assertIn("dars rejasi, taqdimot, test va jonli viktorina bir joyda", blob)
+        self.assertIn("Jamoamiz siz bilan bog'lanadi", blob)
+        self.assertEqual(blob.count("Promo-kod"), 1)
+        self.assertEqual(db.get_lead(7, "safartrip")["source"], "stend")
+        self.assertEqual(db.get_lead(7, "mendora")["role"], "school_owner")
+        self.assertEqual(db.get_lead(7, "mendora")["full_name"], "Ali")
+        cards = " ".join(item["text"] for item in bot.sent)
+        self.assertEqual(len(bot.sent), 2)
+        self.assertIn("SafarTrip", cards)
+        self.assertIn("Mendora", cards)
+
+    async def test_mendora_alone_has_no_safartrip_promo(self) -> None:
+        from bot import ConversationHandler, _finish
+
+        person = self._user()
+        replies: list = []
+        context = self._context(_FakeBot({}))
+        context.user_data.update(
+            {"project": "mendora", "role": "teacher", "full_name": "Ali", "source": "flyer"}
+        )
+        update = SimpleNamespace(effective_message=self._message(person, replies), effective_user=person)
+        with (
+            patch("config.CHANNELS", ()),
+            patch("config.CHANNELS_SAFARTRIP", ()),
+            patch("config.CHANNELS_MENDORA", ()),
+            patch("config.PROMO_CODE_MENDORA", ""),
+            patch("config.ADMIN_CHAT_ID", None),
+        ):
+            state = await _finish(update, context, phone=None, remove_keyboard=False)
+        self.assertEqual(state, ConversationHandler.END)
+        blob = " ".join(item.get("text", "") for item in replies)
+        self.assertNotIn("SCHOOL21", blob)
+        self.assertIn("dars rejasi, taqdimot, test va jonli viktorina bir joyda", blob)
+        self.assertIsNone(db.get_lead(7))
+        self.assertEqual(db.get_lead(7, "mendora")["role"], "teacher")
+
+    async def test_both_asks_for_the_name_once(self) -> None:
+        from bot import ASKING_NAME, CHOOSING_ROLE_MENDORA, on_role
+
+        person = self._user()
+        replies: list = []
+
+        async def answer():
+            return None
+
+        async def edit_message_reply_markup(**kwargs):
+            return None
+
+        context = self._context(_FakeBot({}))
+        context.user_data["project"] = "both"
+        first = SimpleNamespace(
+            data="role:traveler",
+            message=self._message(person, replies),
+            answer=answer,
+            edit_message_reply_markup=edit_message_reply_markup,
+        )
+        update = SimpleNamespace(callback_query=first, effective_user=person)
+        state = await on_role(update, context)
+        self.assertEqual(state, CHOOSING_ROLE_MENDORA)
+        self.assertNotIn(texts.ASK_NAME, " ".join(item.get("text", "") for item in replies))
+        second = SimpleNamespace(
+            data="role:school_owner",
+            message=self._message(person, replies),
+            answer=answer,
+            edit_message_reply_markup=edit_message_reply_markup,
+        )
+        update.callback_query = second
+        state = await on_role(update, context)
+        self.assertEqual(state, ASKING_NAME)
+        self.assertEqual(sum(item.get("text") == texts.ASK_NAME for item in replies), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

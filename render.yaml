@@ -23,3 +23,23 @@ services:
         sync: false
       - key: DB_PATH
         sync: false
+      - key: SITE_URL_SAFARTRIP
+        sync: false
+      - key: SITE_URL_MENDORA
+        sync: false
+      - key: PROMO_CODE_SAFARTRIP
+        sync: false
+      - key: PROMO_TEXT_SAFARTRIP
+        sync: false
+      - key: PROMO_CODE_MENDORA
+        sync: false
+      - key: PROMO_TEXT_MENDORA
+        sync: false
+      - key: CHANNELS_SAFARTRIP
+        sync: false
+      - key: CHANNELS_MENDORA
+        sync: false
+      - key: CONTACT_SAFARTRIP
+        sync: false
+      - key: CONTACT_MENDORA
+        sync: false
